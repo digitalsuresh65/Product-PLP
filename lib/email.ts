@@ -1,4 +1,5 @@
 import nodemailer from "nodemailer";
+import type { SendMailOptions, SentMessageInfo } from "nodemailer";
 import type { OrderRecord } from "@/lib/order-schema";
 import { formatNpr } from "@/lib/product";
 
@@ -71,20 +72,78 @@ function getTransport() {
   });
 }
 
+function mailboxAddress(value: string) {
+  return value.match(/<([^>]+)>/)?.[1]?.trim() || value.trim();
+}
+
 function sender() {
   const brandName = process.env.BRAND_NAME?.trim() || "A&A Fashion Boutique";
-  const emailFrom = required("EMAIL_FROM");
+  const smtpUser = required("SMTP_USER");
+  const configuredFrom = process.env.EMAIL_FROM?.trim() || smtpUser;
+  const configuredAddress = mailboxAddress(configuredFrom);
+  const emailFrom =
+    configuredAddress.toLowerCase() === smtpUser.toLowerCase()
+      ? configuredAddress
+      : smtpUser;
+
   return {
     brandName,
     emailFrom,
-    formatted: emailFrom.includes("<") ? emailFrom : `${brandName} <${emailFrom}>`,
+    formatted: `${brandName} <${emailFrom}>`,
   };
 }
 
-export async function sendBusinessOrderEmail(order: OrderRecord) {
+function acceptedAddress(value: unknown) {
+  if (typeof value === "string") return mailboxAddress(value).toLowerCase();
+  if (
+    value &&
+    typeof value === "object" &&
+    "address" in value &&
+    typeof value.address === "string"
+  ) {
+    return value.address.trim().toLowerCase();
+  }
+  return "";
+}
+
+async function sendAcceptedMail(
+  options: SendMailOptions,
+  recipient: string,
+): Promise<SentMessageInfo> {
   const transport = getTransport();
-  const { brandName, formatted } = sender();
+  const result = await transport.sendMail(options);
+  const expected = mailboxAddress(recipient).toLowerCase();
+  const accepted = Array.isArray(result.accepted)
+    ? result.accepted.map(acceptedAddress)
+    : [];
+
+  if (!accepted.includes(expected)) {
+    throw new Error(`SMTP did not accept the intended recipient (${expected}).`);
+  }
+
+  return result;
+}
+
+export async function sendBusinessOrderEmail(order: OrderRecord) {
+  const { brandName, emailFrom, formatted } = sender();
   const businessEmail = required("BUSINESS_EMAIL");
+  const text = [
+    `New cash on delivery order: ${order.orderId}`,
+    "",
+    `Customer: ${order.fullName}`,
+    `Phone: ${order.phone}`,
+    `Email: ${order.email}`,
+    `Location: ${order.location}`,
+    "",
+    `Product: ${order.productName}`,
+    `Quantity: ${order.quantity}`,
+    `Price per piece: ${formatNpr(order.pricePerPiece)}`,
+    `Total: ${formatNpr(order.totalPrice)}`,
+    `Payment: ${order.paymentMethod}`,
+    `Date and time: ${order.dateTime}`,
+    "",
+    "Please call the customer soon to confirm this order.",
+  ].join("\n");
 
   const html = emailShell(
     `${header(brandName, "New cash on delivery order", "A new order has arrived")}
@@ -114,22 +173,44 @@ export async function sendBusinessOrderEmail(order: OrderRecord) {
     `New order ${order.orderId} from ${order.fullName}`,
   );
 
-  await transport.sendMail({
-    from: formatted,
-    to: businessEmail,
-    replyTo: order.email,
-    subject: `New Product Order Received - ${order.orderId}`,
-    html,
-  });
+  await sendAcceptedMail(
+    {
+      from: formatted,
+      to: businessEmail,
+      replyTo: order.email,
+      envelope: { from: emailFrom, to: businessEmail },
+      subject: `New Product Order Received - ${order.orderId}`,
+      text,
+      html,
+    },
+    businessEmail,
+  );
 }
 
 export async function sendCustomerOrderEmail(order: OrderRecord) {
-  const transport = getTransport();
   const { brandName, emailFrom, formatted } = sender();
   const supportEmail = process.env.BUSINESS_EMAIL?.trim() || emailFrom;
+  const firstName = order.fullName.split(" ")[0];
+  const text = [
+    `Hi ${firstName},`,
+    "",
+    "We have received your order successfully. Our sales representative will call you soon to confirm it.",
+    "",
+    `Order ID: ${order.orderId}`,
+    `Product: ${order.productName}`,
+    `Quantity: ${order.quantity}`,
+    `Total price: ${formatNpr(order.totalPrice)}`,
+    `Payment method: ${order.paymentMethod}`,
+    "",
+    "Please keep your phone available. Payment is collected only when your order is delivered.",
+    `Need help? Reply to this email or contact ${supportEmail}.`,
+    "",
+    `Thank you,`,
+    brandName,
+  ].join("\n");
 
   const html = emailShell(
-    `${header(brandName, "Order received", `Thank you, ${order.fullName.split(" ")[0]}!`)}
+    `${header(brandName, "Order received", `Thank you, ${firstName}!`)}
     <tr><td style="padding:28px 32px;">
       <p style="margin:0;color:#4d4145;font-size:15px;line-height:1.7;">We have received your order successfully. Our sales representative will call you soon to confirm your order.</p>
       <p style="margin:20px 0 6px;color:#796b6f;font-size:12px;text-transform:uppercase;letter-spacing:1.2px;">Order ID</p>
@@ -147,11 +228,16 @@ export async function sendCustomerOrderEmail(order: OrderRecord) {
     `Your ${brandName} order has been received`,
   );
 
-  await transport.sendMail({
-    from: formatted,
-    to: order.email,
-    replyTo: supportEmail,
-    subject: `Your Order Has Been Received - ${brandName}`,
-    html,
-  });
+  await sendAcceptedMail(
+    {
+      from: formatted,
+      to: order.email,
+      replyTo: supportEmail,
+      envelope: { from: emailFrom, to: order.email },
+      subject: `Order confirmation ${order.orderId} - ${brandName}`,
+      text,
+      html,
+    },
+    order.email,
+  );
 }
