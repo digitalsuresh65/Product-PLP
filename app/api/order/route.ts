@@ -41,19 +41,45 @@ function createOrderRecord(
   };
 }
 
+function normalizeOrigin(value: string | null | undefined) {
+  if (!value) return null;
+
+  const candidate = value.trim();
+  if (!candidate) return null;
+
+  try {
+    const url = new URL(
+      candidate.includes("://") ? candidate : `https://${candidate}`,
+    );
+    return url.origin.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
 function originAllowed(request: NextRequest) {
-  const origin = request.headers.get("origin");
+  const origin = normalizeOrigin(request.headers.get("origin"));
   if (!origin) return true;
 
-  const configured = [
+  const forwardedHost = request.headers
+    .get("x-forwarded-host")
+    ?.split(",")[0]
+    ?.trim();
+  const forwardedProtocol =
+    request.headers.get("x-forwarded-proto")?.split(",")[0]?.trim() ||
+    request.nextUrl.protocol.replace(":", "");
+
+  const allowedOrigins = [
+    request.nextUrl.origin,
+    forwardedHost ? `${forwardedProtocol}://${forwardedHost}` : null,
+    process.env.VERCEL_URL,
     process.env.FRONTEND_URL,
     process.env.NEXT_PUBLIC_SITE_URL,
   ]
-    .map((value) => value?.trim().replace(/\/$/, ""))
-    .filter(Boolean);
+    .map(normalizeOrigin)
+    .filter((value): value is string => Boolean(value));
 
-  if (configured.length === 0) return true;
-  return configured.includes(origin.replace(/\/$/, ""));
+  return allowedOrigins.includes(origin);
 }
 
 export async function POST(request: NextRequest) {
